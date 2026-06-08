@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>LUKAZII Visual Operator v1.4 (Pro Modules)</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;600&display=swap');
+:root{--bg:#030303; --panel:#0a0a0a; --line:#222; --accent:#ff7700; --text:#e0e0e0;}
+body{margin:0;background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;overflow:hidden;}
+.app{display:grid;grid-template-columns:300px 1fr 320px;height:100vh;}
+/* HUD 介面風格 */
+.sidebar, .inspector{background:var(--panel);border:1px solid var(--line);padding:20px;}
+.node-item{border:1px solid var(--line);padding:12px;margin-bottom:8px;cursor:pointer;font-family:'JetBrains Mono';font-size:11px;}
+.node-item.active{border-color:var(--accent);background:rgba(255,119,0,0.1);}
+canvas{width:100%;height:100%;display:block;cursor:crosshair;}
+.field label{display:flex;justify-content:space-between;font-size:10px;text-transform:uppercase;color:#888;margin-bottom:6px;}
+</style>
+</head>
+<body>
+<div class="app">
+    <aside class="sidebar">
+        <h2>Module Registry</h2>
+        <div id="moduleList"></div>
+        <button class="btn" style="width:100%;margin-top:10px;" onclick="addModule()">+ ADD MODULE</button>
+    </aside>
+    <main style="display:flex;flex-direction:column;padding:10px;">
+        <div class="canvasWrap" style="flex:1;border:1px solid #333;background:#000;">
+            <canvas id="glCanvas"></canvas>
+        </div>
+        <div style="padding:10px 0;">
+            <button class="btn" onclick="document.getElementById('audioInput').click()">LOAD AUDIO</button>
+            <input type="file" id="audioInput" style="display:none" accept="audio/*">
+        </div>
+    </main>
+    <aside class="inspector" id="inspector"></aside>
+</div>
+
+<script>
+// 基礎狀態
+const state = { activeModule: null, modules: [] };
+let audioCtx, analyser, dataArray;
+
+// === 模組核心：Oscilloscope (示波器) ===
+class Oscilloscope {
+    constructor() {
+        this.name = "Oscilloscope";
+        this.params = { gain: 1.0, speed: 0.5, thickness: 1.5 };
+        this.geometry = new THREE.BufferGeometry();
+        this.geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(512 * 3), 3));
+        this.material = new THREE.LineBasicMaterial({ color: 0xff7700 });
+        this.mesh = new THREE.Line(this.geometry, this.material);
+    }
+    update(data) {
+        const pos = this.geometry.attributes.position.array;
+        for(let i=0; i<256; i++) {
+            pos[i*3] = (i/255)*2 - 1;
+            pos[i*3+1] = (data[i]/128 - 1) * this.params.gain;
+        }
+        this.geometry.attributes.position.needsUpdate = true;
+    }
+}
+
+// === 模組核心：Spectrum (頻譜) ===
+class Spectrum {
+    constructor() {
+        this.name = "Spectrum";
+        this.params = { sensitivity: 1.5, smoothing: 0.8 };
+        this.geometry = new THREE.BufferGeometry();
+        this.geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(256 * 3), 3));
+        this.material = new THREE.LineBasicMaterial({ color: 0x00ffcc });
+        this.mesh = new THREE.Line(this.geometry, this.material);
+    }
+    update(freqData) {
+        const pos = this.geometry.attributes.position.array;
+        for(let i=0; i<128; i++) {
+            pos[i*3] = (i/127)*2 - 1;
+            pos[i*3+1] = (freqData[i]/255) * this.params.sensitivity - 0.8;
+        }
+        this.geometry.attributes.position.needsUpdate = true;
+    }
+}
+
+// === 初始化引擎 ===
+const scene = new THREE.Scene();
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 10);
+const renderer = new THREE.WebGLRenderer({canvas: document.getElementById('glCanvas')});
+renderer.setSize(800, 600);
+
+function addModule() {
+    const mod = state.modules.length % 2 === 0 ? new Oscilloscope() : new Spectrum();
+    state.modules.push(mod);
+    scene.add(mod.mesh);
+    renderSidebar();
+}
+
+function renderSidebar() {
+    const list = document.getElementById('moduleList');
+    list.innerHTML = state.modules.map((m, i) => `
+        <div class="node ${state.activeModule === i ? 'active' : ''}" onclick="state.activeModule=${i}; renderInspector();">
+            <div class="node-info"><strong>${m.name}</strong><span>PARAM_CONTROL</span></div>
+        </div>
+    `).join('');
+}
+
+function renderInspector() {
+    const ins = document.getElementById('inspector');
+    if(state.activeModule === null) return;
+    const m = state.modules[state.activeModule];
+    ins.innerHTML = `<h2>${m.name} SETTINGS</h2>` + Object.entries(m.params).map(([k, v]) => `
+        <div class="field">
+            <label>${k} <span>${v}</span></label>
+            <input type="range" value="${v}" min="0" max="2" step="0.1" oninput="m.params['${k}']=parseFloat(this.value); this.previousElementSibling.querySelector('span').innerText=this.value">
+        </div>
+    `).join('');
+}
+
+// 音訊掛載
+document.getElementById('audioInput').onchange = (e) => {
+    const file = e.target.files[0];
+    audioCtx = new AudioContext();
+    const source = audioCtx.createMediaElementSource(document.getElementById('audioPlayer'));
+    analyser = audioCtx.createAnalyser();
+    source.connect(analyser); analyser.connect(audioCtx.destination);
+    document.getElementById('audioPlayer').src = URL.createObjectURL(file);
+    document.getElementById('audioPlayer').play();
+};
+
+function animate() {
+    requestAnimationFrame(animate);
+    if(analyser) {
+        const timeData = new Uint8Array(256);
+        const freqData = new Uint8Array(128);
+        analyser.getByteTimeDomainData(timeData);
+        analyser.getByteFrequencyData(freqData);
+        
+        state.modules.forEach(m => {
+            if(m instanceof Oscilloscope) m.update(timeData);
+            if(m instanceof Spectrum) m.update(freqData);
+        });
+    }
+    renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>
